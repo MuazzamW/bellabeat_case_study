@@ -1,0 +1,1 @@
+This project is part of the Google Analytics Data Course Capstone where students given real data on BellaBeat users were required to conduct an analysis on the data. This is my analysis, completed in R using mostly ggplot() models. 
