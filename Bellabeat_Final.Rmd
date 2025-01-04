@@ -1,0 +1,445 @@
+---
+title: "Bellabeat_Final"
+author: "Muazzam"
+date: "2024-07-22"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+    theme:
+      bootswatch: journal
+---
+This is a case study completed on Bellabeat - the wellness company. This study focuses on the effectiveness of their smart watches and analyses data from 31 users over a 1 month period. 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Functions and Setup
+
+The following code defines the setup and libraries that are used in this analysis
+```{r, results= 'hide'}
+#set root directory for csv files
+params <- list(
+  root = getwd()
+)
+params$root <- paste0(params$root, "/") ##CHANGE the backslash to "\\" if on UNIX based OS
+
+# library(ggplot2)
+library(tidyr)
+library(stringr)
+library(janitor)
+library(here)
+library(ggplot2)
+library(skimr)
+library(dplyr)
+library(forcats)
+library(scales)
+library(ggrepel)
+library(lubridate)
+```
+
+The following code defines the functions that will be used in the case study
+```{r}
+read = function(s1){
+  paste(params$root,s1,sep="") %>%
+    read.csv()
+}
+
+camel_to_snake <- function(camel_case_names) {
+  # Use str_replace_all from the stringr package to add underscores before uppercase letters
+  snake_case_names <- str_replace_all(camel_case_names, "(?<!^)([A-Z])", "_\\1")
+  # Convert all characters to lowercase
+  snake_case_names <- tolower(snake_case_names)
+  return(snake_case_names)
+}
+```
+
+Below, the appropriate data tables from the Bellabeat dataset are loaded in as local variables
+```{r}
+daily_activity <- read("dailyActivity_merged.csv")
+sleep_day <- read("sleepDay_merged.csv")
+sleep_min <- read("minuteSleep_merged.csv")
+intensity_min <- read("minuteStepsNarrow_merged.csv")
+heart_rate <- read("heartrate_seconds_merged.csv")
+weight <- read("weightLogInfo_merged.csv")
+calories_min <- read("minuteCaloriesNarrow_merged.csv")
+
+#hourly data frames
+
+#minutely data frames
+minute_intensities_narrow_merged <- read("minuteIntensitiesNarrow_merged.csv")
+
+```
+
+
+# Cleaning & Manipulation
+
+The data tables are then cleaned, first checked for any duplicates
+
+```{r}
+sum(duplicated(daily_activity))
+sum(duplicated(sleep_day))
+sum(duplicated(sleep_min))
+sum(duplicated(intensity_min))
+sum(duplicated(heart_rate))
+sum(duplicated(weight))
+sum(duplicated(calories_min))
+```
+
+removing the duplicates yields
+```{r}
+sleep_day <- sleep_day %>%
+  distinct() 
+sleep_min <- sleep_min %>%
+  distinct()
+```
+
+```{r, results='hide'}
+#edit variable names in daily_activity
+daily_activity <- setNames(daily_activity,camel_to_snake(names(daily_activity)))
+
+#edit variable names in sleep_day
+sleep_day <- setNames(sleep_day,camel_to_snake(names(sleep_day)))
+
+
+#cleaning the names
+clean_names(daily_activity)
+
+```
+
+In order to better analyse the data, the `daily_activity` and `sleep_day` tables must be merged as that will display full activity of the user over 24 hours. 
+
+```{r}
+sleep_day_sep <- separate(sleep_day, sleep_day, into = c("activity_date","time","am/pm"), sep = " ", remove = TRUE)
+
+full_day <- daily_activity %>%
+  full_join(sleep_day_sep, by = c("id" = "id", "activity_date" = "activity_date"))
+
+```
+
+Checking to ensure that all recorded metrics with minutes add up to 1440 which indicates that all 24 hours of the day are accounted for
+```{r}
+full_day <- mutate(full_day, total_time=(very_active_minutes+fairly_active_minutes+lightly_active_minutes+sedentary_minutes+total_time_in_bed))
+
+full_day_check1 <- filter(full_day, total_time > 1440)
+glimpse(full_day_check1)
+
+full_day_check2 <- filter(full_day, total_time < 1440)
+glimpse(full_day_check2)
+```
+
+The result above shows that there are 155 rows where total minutes is more than 24 hours and 129 rows where it is less than 24 hours. This results from an inaccuracy in the data. To resolve this, the data from `sleep_min` provides a more accurate representation of how much each person slept, meaning we can count the minutes sleeping from this table instead of using the `full_day_total_time_in_bed` metric. This is done with the following code
+
+```{r}
+sleep_min <- sleep_min %>%
+  mutate(mins = value)
+sleep_min$mins[sleep_min$mins>0] <- 1
+summary(sleep_min)
+```
+Preparing sleep day to merge into `full_day`and finally completing the merge
+```{r}
+sleep_min <- separate(sleep_min, date, into=c('sleep_date','time', 'am/pm'), sep=" ", remove=TRUE)
+sleep_min_prep <- sleep_min %>%
+  group_by(Id,sleep_date) %>%
+  summarise(total_sleep = sum(mins))
+
+full_day_new <- full_day %>% full_join(sleep_min_prep, by=c('id'='Id', 'activity_date'='sleep_date'))
+full_day_new[is.na(full_day_new)] <-0
+head(full_day_new)
+
+```
+
+with the following code we can confirm whether or not the total sleep time is more accurate than before
+```{r}
+full_day_new <- mutate(full_day_new, total_time_new=(very_active_minutes+fairly_active_minutes+lightly_active_minutes+sedentary_minutes+total_sleep))
+
+full_day_check1 <- filter(full_day_new, total_time_new > 1440)
+glimpse(full_day_check1)
+
+full_day_check2 <- filter(full_day_new, total_time_new < 1440)
+glimpse(full_day_check2)
+```
+
+Upon further analysis, it seems that not all the observation for which a `total_distance` value is recorded has a corresponding and equal `tracker_distance` value. When running the code: `sum(daily_activity$total_distance == daily_activity$tracker_distance)`, the results show that only `r sum(daily_activity$total_distance == daily_activity$tracker_distance)`/940 observations include a `tracker_distance` record which matches the `total_distance` observation.
+
+The subset of `daily_activity` which includes the faulty data can be seen with the following code.
+
+```{r}
+subset(full_day_new, total_distance != tracker_distance)%>%
+  print()
+```
+
+
+This discrepancy can be caused by a faulty observation from the Bellabeat wellness tracker and thus should be removed from the data set since the tracker distance and total distance will be used for analysis. 
+
+```{r}
+full_day_cleaned <- subset(full_day_new, total_distance == tracker_distance)
+```
+
+
+Running the following code shows that there are 33 distinct user IDs, or people which were studied across the month.There are only 33 distinct users as this is the max value for any of the sheets from the dataset.
+
+```{r}
+n_distinct(full_day_cleaned$id)
+```
+Therefore, to ease the analysis and plotting, a `user_id` table will be made assigining each of the user ids to a user number as done below
+```{r}
+Users <- paste("User", c(1:33), sep = " ")
+
+Id <- distinct(full_day_new, id)
+
+users_id <- tibble(Users, Id)  
+```
+
+An activity level table will be used to categorize the individuals who spend more than 30 minutes in ver active exercise as `high`, between 10 and 30 as `medium` and below 10 as `low`
+
+```{r}
+AL <- full_day_cleaned %>% 
+  group_by(id) %>%  
+  summarize(
+    median_very_active = median(very_active_minutes)
+  ) %>% 
+  mutate(
+    activity_level = case_when(
+      median_very_active < 10 ~ "Low",
+      median_very_active <= 30 ~ "Med",
+      median_very_active < 210 ~ "High"
+    ),
+    activity_level = factor(
+      activity_level,
+      levels=c('Low', 'Med', 'High')
+    )
+  ) %>% 
+  subset(select = -c(median_very_active))
+```
+
+
+# Plots
+
+Initially, we set up a data table to demonstrate the proportion of time spent exercising in each of the categories indicated by the `full_day_new` table. All the minutes spent except for sleeping were used as the whole and each section `fairly_active`, `lightly_active`, etc were used as the proportions. This is achieved in the following code
+
+```{r}
+AL <- full_day_cleaned %>% #AL indicates activity level
+  group_by(id) %>%  
+  summarize(
+    median_very_active = median(very_active_minutes)
+  ) %>% 
+  mutate(
+    activity_level = case_when(
+      median_very_active < 10 ~ "Low",
+      median_very_active <= 30 ~ "Med",
+      median_very_active < 210 ~ "High"
+    ),
+    activity_level = factor(
+      activity_level,
+      levels=c('Low', 'Med', 'High')
+    )
+  ) %>% 
+  subset(select = -c(median_very_active))
+```
+
+Table `df_formatted` will be created to properly format the data in order to generate the pie charts
+
+```{r}
+df_2 <- full_day_cleaned %>%
+  group_by(id) %>%
+  summarise(very_active_mins = median(very_active_minutes),
+            lightly_active_mins = median(lightly_active_minutes),
+            fairly_active_mins = median(fairly_active_minutes),
+            sedentary_mins = median(sedentary_minutes))
+  
+df_2 <- df_2 %>%
+  mutate(total = rowSums(df_2[, -1]))
+
+df_2 <- df_2 %>%
+  mutate(
+    fairly_active_prop = fairly_active_mins / total,
+    lightly_active_prop = lightly_active_mins / total,
+    very_active_prop = very_active_mins / total,
+    sedentary_prop = sedentary_mins / total
+  )
+```
+
+Since the pie chart can only be generated with long data, the `df_2` table is formatted in a long format as follows
+
+```{r}
+df_long <- df_2 %>%
+  select(id, fairly_active_prop, lightly_active_prop, very_active_prop, sedentary_prop) %>%
+  pivot_longer(cols = -id, names_to = "activity", values_to = "proportion")
+
+df_long <- df_long %>%
+  full_join(users_id, by = c("id" = "id")) %>%
+  full_join(AL, by = c("id" = "id"))
+```
+
+The table is then finally graphed as follows
+
+```{r}
+labels <- c(fairly_active_prop = "Fairly Active", lightly_active_prop = "Lightly Active",
+            very_active_prop = "Very Active",
+            sedentary_prop = "Sedentary")
+colors <- c(fairly_active_prop = "blue", lightly_active_prop = "green", very_active_prop = "red", sedentary_prop = "gray")
+
+ggplot(df_long, aes(x = "", y = proportion, fill = activity)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  facet_wrap(~Users~activity_level) +
+  labs(title = "Proportion of Time Spent in Each Activity Category by ID and Activity Level") +
+  theme_void() +
+  theme(legend.position = "bottom") + 
+  scale_fill_manual(values = colors, labels = labels)+
+  geom_label(data = df_long, aes(label = 100*round(proportion,2), size = 2.0, show.legend = FALSE))
+```
+
+From the graphs, we can see that those who spend at least 30 minutes in very active exercise each day (high), always spend at least 2% of their total exercise time in very active exercise. All the users classified as medium exercise have a proportion of very active exercise at 1%. This can be used for marketing and demographic research purposes. It seems that people spend at most 2-3% of their time exercising at a high intensity which can influence marketing strategies and change the demographic of people. 
+
+Further, we compare total steps to total distance to observe if a trend emerges. 
+
+```{r}
+ggplot(full_day_cleaned, aes(x=total_steps, y=total_distance)) + 
+  geom_point(aes(color="red")) +
+  geom_smooth(method="lm",se=FALSE) + 
+  labs(caption = lm(daily_activity$total_distance ~ daily_activity$total_steps)) 
+```
+
+The correlation function indicates that the correlation coefficient between the `total_steps` and `total_distance` is equal to `r cor(full_day_cleaned$total_steps, full_day_cleaned$total_distance)` which indicates that the more steps people take, the greater distance they travel.
+
+However, `n_distinct(full_day_cleaned$id)` outputs that there are only `r n_distinct(full_day_cleaned$id)` distinct user IDs (people) that represent the data, therefore, most of the points on the scatter plot are multiple observations from a single person. Thus, by creating a pivot table that calculates the average of all the fields per ID, a more comprehensive scatter plot can be made. 
+
+```{r}
+daily_activity_pivot_table <- full_day_cleaned %>%
+  group_by(id) %>%
+  summarise(
+   across(where(is.numeric),mean,na.rm = TRUE)
+  ) %>%
+  rename_with(~ paste0("avg_", .), -id)
+ print(daily_activity_pivot_table)
+```
+
+Now, plotting `avg_total_distance` and `avg_steps_taken` reveals
+
+```{r}
+ggplot(data=daily_activity_pivot_table, aes(x=avg_total_steps, y=avg_total_distance)) + 
+  geom_point(aes(color="red")) +
+  geom_smooth(method="lm",se=FALSE) + 
+  labs(caption = lm(daily_activity_pivot_table$avg_total_distance ~ daily_activity_pivot_table$avg_total_steps))
+```
+This analysis returns a correlation of `r cor(daily_activity_pivot_table$avg_total_steps, daily_activity_pivot_table$avg_total_distance)` which is a very strong positive correlation, indicating that steps actually translate into distance traveled and are a good measure of activity.
+
+Another analysis we can look at is the relationship between minutes asleep and time in bed. 
+
+```{r}
+ggplot(data=full_day_cleaned, aes(x=total_sleep, y=total_time_in_bed)) +
+  geom_point(aes(color="red")) +
+  geom_smooth(method="lm",se=FALSE)
+  labs(caption = lm(full_day_cleaned$total_time_in_bed ~ full_day_cleaned$total_sleep))
+```
+
+The correlation between these two variables is `r cor(full_day_cleaned$total_sleep, full_day_cleaned$total_time_in_bed)` which indicates a strong positive, linear relationship. Some notable outliers are those at the far right extreme who spend the most minutes sleeping, but spend significantly more time in bed than predicted. These deviations occur between 10 to 13 hours of sleep which can indicate an oversleeping pattern that results in more time in bed. To further analyze this trend, the `sleep_day` table can be organized to show the observations of those with the most time in bed: 
+```{r}
+sleep_day %>%
+  arrange(desc(total_time_in_bed)) %>%
+  slice(1:10)
+```
+Note that 3 of the 4 top observations for most time in bed come from one person (same user ID). In fact, there are only `r n_distinct(sleep_day$id)` user IDs in the entire table, so plotting each point as a separate observation does not necessarily help. Therefore, it is useful to create a pivot table that shows the `total_sleep_records`, `average_minutes_asleep` and `average_time_in_bed` for each user ID. This is accomplished with the following code:
+
+```{r}
+sleeping_pivot_table <- sleep_day %>%
+  group_by(id) %>%
+  summarise(
+    average_minutes_sleeping = mean(total_minutes_asleep, na.rm = TRUE),
+    average_time_in_bed = mean(total_time_in_bed, na.rm = TRUE)
+  )
+print(sleeping_pivot_table)
+```
+
+Plotting this data yields the following result.
+
+```{r}
+outliers <- c(1844505072, 3977333714)
+
+ggplot(data=sleeping_pivot_table, aes(x=average_minutes_sleeping, y=average_time_in_bed)) + 
+  geom_point(aes(color="red")) +
+  geom_smooth(method="lm",se=FALSE) + 
+  geom_text(
+    data = sleeping_pivot_table %>% filter(id %in% outliers),
+    aes(label = id),
+    vjust = +2,
+    hjust = +0.6,
+    color = "red",
+    size = 3
+  ) +
+  labs(
+    title = "Scatter Plot of Average Minutes Sleeping vs Average Time in Bed",
+    x = "Average Minutes Sleeping",
+    y = "Average Time in Bed"
+  ) + 
+  labs(caption = lm(sleeping_pivot_table$average_time_in_bed ~ sleeping_pivot_table$average_minutes_sleeping))
+```
+This scatter plot shows a correlation of `r cor(sleeping_pivot_table$average_minutes_sleeping,sleeping_pivot_table$average_time_in_bed)` which indicates a strong positive linear correlation. In this scatter plot, there are namely two outliers, user 1844505072 and user 3977333714 who spend more time in bed than the average person for their given minutes asleep. This can be attributed to a possible error in the data or the fact that some of the sedentary minutes that the watch records are also considered as sleeping time even though the user is most likely awake.  
+
+Finally, I will analyse the heart rate data to see at what times of the day users are experiencing the highest heart rates and how that corresponds to their activity level rating.
+
+```{r}
+#format the heart_rate table to break the activity day column by data
+heart_rate$Time <- parse_date_time(
+  heart_rate$Time, 
+  "%m/%d/%y %I:%M:%S %p"
+)
+
+heart_rate <- heart_rate %>%
+  mutate(ActivityDay = date(Time))
+
+heart_rate_AL <- heart_rate %>%
+  left_join(AL, by = c("Id"="id"))
+
+heart_rate_AL <- heart_rate_AL %>% 
+  mutate(
+    Hour = format(Time, "%k")
+  )
+
+
+```
+
+
+Next, we pivot by hour to find the activity day with the most recorded hours
+```{r}
+#pivot by hour and calculate the average bpm for each our of each day for each user
+heart_rate_pivot <- heart_rate_AL %>%
+  group_by(Id,ActivityDay,Hour) %>%
+  summarise(mean_bpm_hour = mean(Value))
+
+#select the day with the most recorded hours for each userID so that the analysis can be maximized
+most_hours_day <- heart_rate_AL %>%
+  group_by(Id, ActivityDay) %>%
+  summarize(hours_recorded = n()) %>%
+  ungroup() %>%
+  group_by(Id) %>%
+  filter(hours_recorded == max(hours_recorded)) %>%
+  slice(1) %>%  # In case of ties, select the first occurrence
+  select(Id, ActivityDay)
+
+# Filter the data for the random day for each user
+filtered_heart_rate <- heart_rate_pivot %>%
+  inner_join(most_hours_day, by = c("Id", "ActivityDay" = "ActivityDay")) %>%
+  inner_join(AL, by = c("Id" = "id"))
+```
+
+
+Finally plot the data
+```{r}
+#finally, plot the data and facet wrap by the user ID and their acivity level
+ggplot(filtered_heart_rate, aes(x=Hour, y = mean_bpm_hour, color = as.factor(Id), 
+                             group = interaction(Id,ActivityDay))) + 
+  geom_line() +
+  facet_wrap(~Id~activity_level) + 
+  labs(title = "Mean BPM per Hour for Each User ID",
+       x = "Hour of Day",
+       y = "Mean BPM",
+       color = "User ID") + 
+  theme_minimal()
+```
+We can see that people who Identify as high intensity users usually have one significant peak of high bpm throughout their day on average, indicating that most of their exercise is concentrated and completed at one time. For those who Identify as low exercisign people, their bpm line graphs are smoother and exhibit fewer peaks, rather more gradual increases which can suggest prolonged exercise at a lower intensity. Those who identify as medium exercisers usually have a noticeable peak, but may have more throughout the day at a lower bpm than the high intensity users.
+
